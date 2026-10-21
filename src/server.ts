@@ -6,6 +6,7 @@ import { pool } from "./config/db.js"
 import budgetRoutes from "./routes/budgetRoutes.js"
 import transactionRoutes from "./routes/transactionsRoutes.js"
 import savingsGoalRoutes from "./routes/savingsGoalRoutes.js"
+import accountRoutes from "./routes/accountRoutes.js"
 
 const app = express()
 const port = Number(process.env.PORT ?? 3001)
@@ -44,6 +45,7 @@ app.use("/api/transactions", transactionRoutes)
 app.use("/api/budgets", budgetRoutes)
 
 app.use("/api/savings-goals", savingsGoalRoutes)
+app.use("/api/accounts", accountRoutes)
 
 // Middleware 404 harus diletakkan setelah semua route
 app.use((_req, res) => {
