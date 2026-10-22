@@ -229,7 +229,7 @@ export async function deleteGoal(req: Request, res: Response): Promise<void> {
             ELSE -amount
           END
         ), 0
-      ) AS balance
+      ) AS initial_balance
       FROM savings_movements
       WHERE goal_id = ?`,
       [id],
@@ -313,14 +313,22 @@ export async function getMovements(req: Request, res: Response): Promise<void> {
       return;
     }
 
-    const [rows] = await pool.query<MovementRow[]>(
-      `SELECT id, goal_id, type, amount, note,
-              DATE_FORMAT(movement_date, '%Y-%m-%d') AS movement_date
-       FROM savings_movements
-       WHERE goal_id = ?
-       ORDER BY movement_date DESC, id DESC`,
-      [goalId],
-    );
+    
+const [rows] = await pool.query<MovementRow[]>(
+  `SELECT
+     id,
+     goal_id,
+     account_id,
+     type,
+     amount,
+     note,
+     DATE_FORMAT(movement_date, '%Y-%m-%d') AS movement_date
+   FROM savings_movements
+   WHERE goal_id = ?
+   ORDER BY movement_date DESC, id DESC`,
+  [goalId],
+);
+
 
     res.json(
       rows.map((row) => ({
@@ -345,11 +353,18 @@ export async function createMovement(
   try {
     const goalId = Number(req.params.id);
 
-    const { type, amount, note, movement_date } = req.body as {
+    const {
+      type,
+      amount,
+      note,
+      movement_date,
+      account_id,
+    } = req.body as {
       type?: unknown;
       amount?: unknown;
       note?: unknown;
       movement_date?: unknown;
+      account_id?: unknown;
     };
 
     if (
@@ -357,6 +372,8 @@ export async function createMovement(
       goalId <= 0 ||
       (type !== "deposit" && type !== "withdrawal") ||
       !validAmount(amount) ||
+      !Number.isSafeInteger(account_id) ||
+      Number(account_id) <= 0 ||
       (note !== undefined &&
         note !== null &&
         (typeof note !== "string" || note.trim().length > 255)) ||
@@ -368,6 +385,7 @@ export async function createMovement(
       return;
     }
 
+    const accountId = Number(account_id);
     const effectiveDate =
       movement_date ?? new Date().toISOString().slice(0, 10);
 
@@ -376,7 +394,7 @@ export async function createMovement(
 
     await connection.beginTransaction();
 
-    // Ambil nama target sekaligus mengunci baris target
+    // 1. Kunci target tabungan.
     const [goals] = await connection.query<RowDataPacket[]>(
       `SELECT id, name
        FROM savings_goals
@@ -387,7 +405,6 @@ export async function createMovement(
 
     if (goals.length === 0) {
       await connection.rollback();
-
       res.status(404).json({
         message: "Target tidak ditemukan.",
       });
@@ -396,7 +413,35 @@ export async function createMovement(
 
     const goalName = String(goals[0].name);
 
-    // Periksa saldo tabungan sebelum penarikan
+    // 2. Kunci rekening yang dipilih.
+    const [accountRows] = await connection.query<RowDataPacket[]>(
+      `SELECT id, initial_balance
+       FROM accounts
+       WHERE id = ?
+       FOR UPDATE`,
+      [accountId],
+    );
+
+    if (accountRows.length === 0) {
+      await connection.rollback();
+      res.status(404).json({
+        message: "Rekening tidak ditemukan.",
+      });
+      return;
+    }
+
+    const accountBalance = Number(accountRows[0].balance);
+
+    // 3. Untuk setoran, pastikan saldo rekening mencukupi.
+    if (type === "deposit" && amount > accountBalance) {
+      await connection.rollback();
+      res.status(400).json({
+        message: "Saldo rekening tidak mencukupi untuk setoran.",
+      });
+      return;
+    }
+
+    // 4. Untuk penarikan, periksa saldo target tabungan.
     if (type === "withdrawal") {
       const [balanceRows] = await connection.query<RowDataPacket[]>(
         `SELECT COALESCE(
@@ -406,17 +451,16 @@ export async function createMovement(
               ELSE -amount
             END
           ), 0
-        ) AS balance
+        ) AS initial_balance
         FROM savings_movements
         WHERE goal_id = ?`,
         [goalId],
       );
 
-      const balance = Number(balanceRows[0].balance);
+      const savingsBalance = Number(balanceRows[0].balance);
 
-      if (amount > balance) {
+      if (amount > savingsBalance) {
         await connection.rollback();
-
         res.status(400).json({
           message: "Penarikan melebihi saldo tabungan yang tersedia.",
         });
@@ -424,31 +468,78 @@ export async function createMovement(
       }
     }
 
-    // Simpan riwayat setoran atau penarikan
-    const [result] = await connection.query<ResultSetHeader>(
-      `INSERT INTO savings_movements
-        (goal_id, type, amount, note, movement_date)
-       VALUES (?, ?, ?, ?, ?)`,
-      [goalId, type, amount, normalizedNote, effectiveDate],
-    );
-
-    // Setoran dicatat sebagai pengeluaran pada transaksi keuangan
-
+    // 5. Perbarui saldo rekening.
     if (type === "deposit") {
+      const [updateResult] =
+        await connection.query<ResultSetHeader>(
+          `UPDATE accounts
+           SET initial_balance = initial_balance - ?
+           WHERE id = ? AND initial_balance >= ?`,
+          [amount, accountId, amount],
+        );
+
+      if (updateResult.affectedRows === 0) {
+        await connection.rollback();
+        res.status(400).json({
+          message: "Saldo rekening tidak mencukupi.",
+        });
+        return;
+      }
+    } else {
       await connection.query<ResultSetHeader>(
-        `INSERT INTO transactions
-        (title, amount, type, category, date)
-      VALUES (?, ?, ?, ?, ?)`,
-        [`Tabungan ${goalName}`, amount, "expense", "Tabungan", effectiveDate],
+        `UPDATE accounts
+         SET initial_balance = initial_balance + ?
+         WHERE id = ?`,
+        [amount, accountId],
       );
     }
 
-    // Simpan kedua perubahan secara bersamaan
+    // 6. Simpan riwayat tabungan beserta rekeningnya.
+    const [movementResult] =
+      await connection.query<ResultSetHeader>(
+        `INSERT INTO savings_movements
+          (goal_id, account_id, type, amount, note, movement_date)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          goalId,
+          accountId,
+          type,
+          amount,
+          normalizedNote,
+          effectiveDate,
+        ],
+      );
+
+    // 7. Catat transaksi keuangan.
+    const transactionType =
+      type === "deposit" ? "expense" : "income";
+
+    const transactionTitle =
+      type === "deposit"
+        ? `Tabungan ${goalName}`
+        : `Penarikan Tabungan ${goalName}`;
+
+    await connection.query<ResultSetHeader>(
+      `INSERT INTO transactions
+        (title, amount, type, category, date, account_id)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        transactionTitle,
+        amount,
+        transactionType,
+        "Tabungan",
+        effectiveDate,
+        accountId,
+      ],
+    );
+
+    // 8. Simpan seluruh perubahan sekaligus.
     await connection.commit();
 
     res.status(201).json({
-      id: result.insertId,
+      id: movementResult.insertId,
       goal_id: goalId,
+      account_id: accountId,
       type,
       amount,
       note: normalizedNote,

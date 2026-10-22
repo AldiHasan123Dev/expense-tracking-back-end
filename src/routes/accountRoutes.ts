@@ -1,4 +1,3 @@
-// src/routes/accountRoutes.ts
 
 import { Router } from "express"
 import {
@@ -15,7 +14,6 @@ const router = Router()
 router.get("/", index)
 
 // Transfer saldo antar-rekening.
-// Letakkan sebelum route dinamis jika nanti menambahkan GET /:id.
 router.post("/transfers", transfer)
 
 // CRUD rekening.
