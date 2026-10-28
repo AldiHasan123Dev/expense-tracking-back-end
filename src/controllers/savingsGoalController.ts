@@ -561,3 +561,83 @@ export async function createMovement(
     connection.release();
   }
 }
+
+
+export async function getWithdrawableDeposits(
+  req: Request,
+  res: Response
+): Promise<void> {
+  try {
+    const goalId = Number(req.params.id)
+    const accountId = Number(req.query.account_id)
+
+    if (
+      !Number.isInteger(goalId) ||
+      goalId <= 0 ||
+      !Number.isInteger(accountId) ||
+      accountId <= 0
+    ) {
+      res.status(400).json({
+        message: "ID target tabungan atau rekening tidak valid.",
+      })
+      return
+    }
+
+    // Pastikan target tabungan tersedia.
+    const [goalRows] = await pool.execute<RowDataPacket[]>(
+      "SELECT id FROM savings_goals WHERE id = ? LIMIT 1",
+      [goalId]
+    )
+
+    if (goalRows.length === 0) {
+      res.status(404).json({
+        message: "Target tabungan tidak ditemukan.",
+      })
+      return
+    }
+
+    // Ambil setoran yang masih memiliki saldo untuk ditarik.
+    const [rows] = await pool.execute<RowDataPacket[]>(
+      `
+      SELECT
+        sm.id AS movement_id,
+        sm.transaction_id,
+        sm.goal_id,
+        sm.account_id,
+        sm.amount,
+        COALESCE(SUM(w.amount), 0) AS withdrawn_amount,
+        GREATEST(
+          sm.amount - COALESCE(SUM(w.amount), 0),
+          0
+        ) AS remaining_amount,
+        DATE_FORMAT(sm.movement_date, '%Y-%m-%d') AS movement_date
+      FROM savings_movements sm
+      LEFT JOIN savings_movements w
+        ON w.source_transaction_id = sm.transaction_id
+        AND w.type = 'withdrawal'
+      WHERE sm.goal_id = ?
+        AND sm.account_id = ?
+        AND sm.type = 'deposit'
+        AND sm.transaction_id IS NOT NULL
+      GROUP BY
+        sm.id,
+        sm.transaction_id,
+        sm.goal_id,
+        sm.account_id,
+        sm.amount,
+        sm.movement_date
+      HAVING remaining_amount > 0
+      ORDER BY sm.movement_date DESC, sm.id DESC
+      `,
+      [goalId, accountId]
+    )
+
+    res.status(200).json(rows)
+  } catch (error) {
+    console.error("getWithdrawableDeposits error:", error)
+
+    res.status(500).json({
+      message: "Gagal mengambil daftar setoran yang bisa ditarik.",
+    })
+  }
+}

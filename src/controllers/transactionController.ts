@@ -431,7 +431,7 @@ export async function show(
     }
 
     const [rows] = await pool.execute<TransactionRow[]>(
-      `${selectSql} WHERE id = ?`,
+      `${selectSql} WHERE t.id = ?`,
       [id],
     )
 
@@ -508,7 +508,7 @@ export async function store(
     )
 
     const [rows] = await connection.execute<TransactionRow[]>(
-      `${selectSql} WHERE id = ?`,
+      `${selectSql} WHERE t.id = ?`,
       [result.insertId],
     )
 
@@ -573,7 +573,7 @@ export async function update(
      * akan dibaca ulang dengan FOR UPDATE.
      */
     const [snapshotRows] = await connection.execute<TransactionRow[]>(
-      `${selectSql} WHERE id = ?`,
+      `${selectSql} WHERE t.id = ?`,
       [id],
     )
 
@@ -697,7 +697,7 @@ export async function update(
     )
 
     const [rows] = await connection.execute<TransactionRow[]>(
-      `${selectSql} WHERE id = ?`,
+      `${selectSql} WHERE t.id = ?`,
       [id],
     )
 
@@ -748,7 +748,7 @@ export async function destroy(
 
     // Baca transaksi untuk mengetahui rekening yang harus dikunci.
     const [snapshotRows] = await connection.execute<TransactionRow[]>(
-      `${selectSql} WHERE id = ?`,
+      `${selectSql} WHERE t.id = ?`,
       [id],
     )
 
